@@ -1,0 +1,115 @@
+name: Release
+
+on:
+  push:
+    tags: ["v*"]
+
+permissions:
+  contents: write
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+      - run: go vet ./...
+      - run: go test ./...
+
+  release:
+    needs: test
+    runs-on: ubuntu-latest
+    env:
+      TAG: ${{ github.ref_name }}
+      BIN: furycube-g3-linux-bridge
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+
+      - name: Build binaries
+        run: |
+          set -euo pipefail
+          mkdir -p dist
+          targets=(
+            "amd64 x86_64"
+            "arm64 aarch64"
+          )
+          for t in "${targets[@]}"; do
+            read -r goarch label <<<"$t"
+            name="${BIN}-${TAG}-linux-${label}"
+            stage="dist/${name}"
+            mkdir -p "$stage"
+            GOOS=linux GOARCH="$goarch" CGO_ENABLED=0 \
+              go build -trimpath -ldflags "-s -w" -o "${stage}/${BIN}" .
+            cp LICENSE README.md "$stage/"
+            cp -r docs "$stage/"
+            tar -C dist -czf "dist/${name}.tar.gz" "$name"
+            rm -rf "$stage"
+          done
+          cd dist
+          sha256sum *.tar.gz | tee SHA256SUMS
+
+      - name: Write release notes
+        run: |
+          set -euo pipefail
+          repo="${GITHUB_REPOSITORY}"
+          {
+            echo "## Furycube G3 Linux bridge ${TAG}"
+            echo
+            echo "Use the official **Furycube G3** web driver (bk-gmice.com) on Linux, with no Windows and no vendor app."
+            echo "Static binaries, no dependencies. Pick the one for your CPU (\`uname -m\`)."
+            echo
+            echo "### Downloads"
+            echo
+            echo "| Architecture | \`uname -m\` | File |"
+            echo "| --- | --- | --- |"
+            echo "| 64-bit Intel/AMD | \`x86_64\` | \`${BIN}-${TAG}-linux-x86_64.tar.gz\` |"
+            echo "| 64-bit ARM (Raspberry Pi, Apple Silicon VM, etc.) | \`aarch64\` | \`${BIN}-${TAG}-linux-aarch64.tar.gz\` |"
+            echo
+            echo "### Quick start"
+            echo
+            echo '```sh'
+            echo "arch=\$(uname -m)   # x86_64 or aarch64"
+            echo "curl -LO https://github.com/${repo}/releases/download/${TAG}/${BIN}-${TAG}-linux-\${arch}.tar.gz"
+            echo "tar xzf ${BIN}-${TAG}-linux-\${arch}.tar.gz"
+            echo "sudo ./${BIN}-${TAG}-linux-\${arch}/${BIN}"
+            echo '```'
+            echo
+            echo "Then open https://www.bk-gmice.com in your browser."
+            echo
+            echo "### Checksums (SHA-256)"
+            echo
+            echo '```'
+            cat dist/SHA256SUMS
+            echo '```'
+            echo
+            echo "Verify after downloading:"
+            echo
+            echo '```sh'
+            echo "curl -LO https://github.com/${repo}/releases/download/${TAG}/SHA256SUMS"
+            echo "sha256sum -c --ignore-missing SHA256SUMS"
+            echo '```'
+            echo
+            echo "> Unofficial and written by AI. It sends configuration reports to your mouse's firmware, so use it at your own risk. See the [README](https://github.com/${repo}#readme)."
+            echo
+            echo "---"
+            echo
+            echo "### What's changed"
+          } > notes.md
+
+      - name: Create release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          flags=()
+          case "$TAG" in *-*) flags+=(--prerelease) ;; esac
+          gh release create "$TAG" dist/*.tar.gz dist/SHA256SUMS \
+            --title "${BIN} ${TAG}" \
+            --notes-file notes.md \
+            --generate-notes \
+            --verify-tag \
+            "${flags[@]}"
